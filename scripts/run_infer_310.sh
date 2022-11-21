@@ -1,7 +1,5 @@
-#!/bin/bash
-
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "Usage: bash run_infer_310.sh [MODEL_PATH] [TEST_PATH] [NEED_PREPROCESS]
+  echo "Usage: bash scripts/run_infer_310.sh [MODEL_PATH] [TEST_PATH] [NEED_PREPROCESS]
     NEED_PREPROCESS means weather need preprocess or not, it's value is 'y' or 'n'."
   exit 1
 fi
@@ -38,15 +36,15 @@ if [ -d ${ASCEND_HOME}/ascend-toolkit ]; then
     export ASCEND_OPP_PATH=$ASCEND_HOME/ascend-toolkit/latest/opp
 else
     export ASCEND_HOME=/usr/local/Ascend/latest/
-    export PATH=$ASCEND_HOME/fwkacllib/bin:$ASCEND_HOME/fwkacllib/ccec_compiler/bin:$ASCEND_HOME/atc/ccec_compiler/bin:$ASCEND_HOME/atc/bin:$PATH
+    export PATH=$ASCEND_HOME/fwkacllib/bin:$ASCEND_HOME/fwkacllib/ccec_compiler/bin:$ASCEND_HOME/fwkacllib/ccec_compiler/bin:$ASCEND_HOME/atc/bin:$PATH
     export LD_LIBRARY_PATH=$ASCEND_HOME/fwkacllib/lib64:/usr/local/lib:$ASCEND_HOME/atc/lib64:$ASCEND_HOME/acllib/lib64:$ASCEND_HOME/driver/lib64:$ASCEND_HOME/add-ons:$LD_LIBRARY_PATH
-    export PYTHONPATH=$ASCEND_HOME/fwkacllib/python/site-packages:$ASCEND_HOME/atc/python/site-packages:$PYTHONPATH
+    export PYTHONPATH=$ASCEND_HOME/atc/python/site-packages:$PYTHONPATH
     export ASCEND_OPP_PATH=$ASCEND_HOME/opp
 fi
 
 function preprocess_data() {
-  if [ -d ./preprocess_310_Result ]; then
-    rm -rf /preprocess_310_Result
+  if [ -d preprocess_310_Result  ]; then
+    rm -rf ./preprocess_310_Result
   fi
   mkdir preprocess_310_Result
   python ./preprocess_310.py --test_dir=$test_path --out_dir=./preprocess_310_Result/
@@ -64,7 +62,7 @@ function infer() {
   fi
   mkdir result_Files
 
-  ./ascend310_infer/build/DPRNN $model ./preprocess_310_Result/  &> infer.log
+  ./ascend310_infer/build/dprnn $model ./preprocess_310_Result/  &> infer.log
 
 }
 
@@ -81,12 +79,12 @@ if [ $need_preprocess == "y" ]; then
 fi
 compile_app
 if [ $? -ne 0 ]; then
-  echo "compile add code failed"
+  echo "compile app code failed"
   exit 1
 fi
 infer
 if [ $? -ne 0 ]; then
-  echo "execute inference failed"
+  echo " execute inference failed"
   exit 1
 fi
 cal_acc

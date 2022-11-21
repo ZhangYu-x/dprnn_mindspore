@@ -1,10 +1,12 @@
 import os
 import argparse
+from itertools import permutations
 import numpy as np
 from mir_eval.separation import bss_eval_sources
 from src.data import DatasetGenerator
-from src.Loss import loss
+import mindspore
 import mindspore.dataset as ds
+import mindspore.ops as ops
 from mindspore import context, Tensor
 
 parser = argparse.ArgumentParser('Evaluate separation performance using DPTNet')
@@ -21,6 +23,8 @@ parser.add_argument('--batch_size', default=3, type=int,
 parser.add_argument('--segment', default=4, type=int,
                     help='The hidden size of RNN')
 
+EPS = 1e-8
+
 def evaluate(args, list1):
     total_SISNRi = 0
     total_SDRi = 0
@@ -36,12 +40,14 @@ def evaluate(args, list1):
         padded_mixture = data["mixture"]
         mixture_lengths = data["lens"]
         padded_source = data["sources"]
+        padded_mixture = ops.Cast()(padded_mixture, mindspore.float32)
+        padded_source = ops.Cast()(padded_source, mindspore.float32)
         mixture_lengths_with_list = mixture_lengths.asnumpy().tolist()
         estimate_source = list1[i]
         i += 1
-        my_loss = loss()
-        _, _, estimate_source, reorder_estimate_source = \
-            my_loss(padded_source, estimate_source, mixture_lengths)
+
+        _, estimate_source, reorder_estimate_source = \
+            cal_loss(padded_source, estimate_source, mixture_lengths)
         mixture = remove_pad(padded_mixture, mixture_lengths_with_list)
         source = remove_pad(padded_source, mixture_lengths_with_list)
         # NOTE: use reorder estimate source
@@ -138,8 +144,116 @@ def remove_pad(inputs, inputs_lengths):
             results.append(input_data[:inputs_lengths[i]].view(-1).asnumpy())
     return results
 
+def cal_loss(source, estimate_source, source_lengths):
+    """
+    Args:
+        source: [B, C, T], B is batch size
+        estimate_source: [B, C, T]
+        source_lengths: [B]
+    """
+    max_snr, perms, max_snr_idx = cal_si_snr_with_pit(source, estimate_source, source_lengths)
+    mean = ops.ReduceMean()
+    loss = 0 - mean(max_snr)
+    reorder_estimate_source = reorder_source(estimate_source, perms, max_snr_idx)
+    return loss, estimate_source, reorder_estimate_source
+
+
+def cal_si_snr_with_pit(source, estimate_source_0, source_lengths):
+    """Calculate SI-SNR with PIT training.
+    Args:
+        source: [B, C, T], B is batch size
+        estimate_source: [B, C, T]
+        source_lengths: [B], each item is between [0, T]
+    """
+    B, C, _ = source.shape
+    # mask padding position along T
+    mask = get_mask(source, source_lengths)
+    estimate_source_1 = estimate_source_0 * mask
+
+    # Step 1. Zero-mean norm
+    num_samples = source_lengths.view(-1, 1, 1).astype(mindspore.float32)
+    sum_ = ops.ReduceSum(keep_dims=True)
+    mean_target = sum_(source, 2) / num_samples
+    mean_estimate = sum_(estimate_source_1, 2) / num_samples
+    zero_mean_target_0 = source - mean_target
+    zero_mean_estimate_0 = estimate_source_1 - mean_estimate
+    # mask padding position along T
+    zero_mean_target = zero_mean_target_0 * mask
+    zero_mean_estimate = zero_mean_estimate_0 * mask
+    # Step 2. SI-SNR with PIT
+    # reshape to use broadcast
+    expand_dims_0 = ops.ExpandDims()
+    s_target = expand_dims_0(zero_mean_target, 1)  # [B, 1, C, T]
+    s_estimate = expand_dims_0(zero_mean_estimate, 2)  # [B, C, 1, T]
+    # s_target = <s', s>s / ||s||^2
+    pair_wise_dot_0 = sum_(s_estimate * s_target, 3)  # [B, C, C, 1]
+    s_target_energy_0 = sum_(s_target * s_target, 3) + EPS  # [B, 1, C, 1]
+    pair_wise_proj = pair_wise_dot_0 * s_target / s_target_energy_0  # [B, C, C, T]
+    # e_noise = s' - s_target
+    e_noise = s_estimate - pair_wise_proj  # [B, C, C, T]
+    # SI-SNR = 10 * log_10(||s_target||^2 / ||e_noise||^2)
+    _sum = ops.ReduceSum(keep_dims=False)
+    pair_wise_si_snr_0 = _sum(pair_wise_proj * pair_wise_proj, 3) / (_sum(e_noise * e_noise, 3) + EPS)
+    log = ops.Log()
+    log_10 = Tensor(np.array([10.0]), mindspore.float32)
+    temp = log(log_10) / 10
+    pair_wise_si_snr_1 = log(pair_wise_si_snr_0 + EPS)
+    pair_wise_si_snr = pair_wise_si_snr_1 / temp # [B, C, C]
+
+    # Get max_snr of each utterance
+    # permutations, [C!, C]
+    perms = Tensor(list(permutations(range(2))), dtype=mindspore.int64)
+    perms_one_hot = perms_one_hot = Tensor(np.array([[1, 0], [0, 1], [0, 1], [1, 0]]), mindspore.float32)
+    matmul = ops.MatMul()
+    snr_set = matmul(pair_wise_si_snr.view(B, -1), perms_one_hot)
+    Argmax = ops.Argmax(axis=1, output_type=mindspore.int32)
+    max_snr_idx = Argmax(snr_set)  # [B]
+    argmax = ops.ArgMaxWithValue(axis=1, keep_dims=True)
+    _, max_snr = argmax(snr_set)
+    max_snr /= C
+    return max_snr, perms, max_snr_idx
+
+def reorder_source(source, perms, max_snr_idx):
+    """
+    Args:
+        source: [B, C, T]
+        perms: [C!, C], permutations
+        max_snr_idx: [B], each item is between [0, C!)
+    Returns:
+        reorder_source: [B, C, T]
+    """
+    B, C, _ = source.shape
+    # [B, C], permutation whose SI-SNR is max of each utterance
+    # for each utterance, reorder estimate source according this permutation
+    max_snr_perm = perms[max_snr_idx, :]
+    zeros_like = ops.ZerosLike()
+    reorder_source1 = zeros_like(source)
+    for b in range(B):
+        for c in range(C):
+            if max_snr_perm[b][c] == 1:
+                reorder_source1[b, c] = source[b, 1]
+            else:
+                reorder_source1[b, c] = source[b, 0]
+    return reorder_source1
+
+
+def get_mask(source, source_lengths):
+    """
+    Args:
+        source: [B, C, T]
+        source_lengths: [B]
+    Returns:
+        mask: [B, 1, T]
+    """
+    B, _, T = source.shape
+    ones = ops.Ones()
+    mask = ones((B, 1, T), mindspore.float32)
+    for i in range(B):
+        mask[i, :, 32000:] = 0
+    return mask
+
 if __name__ == "__main__":
-    context.set_context(mode=context.GRAPH_MODE, device_target="Ascend", device_id=0)
+    context.set_context(mode=context.GRAPH_MODE, device_target="CPU")
     arg = parser.parse_args()
     audio_files = os.listdir(arg.bin_path)
     audio_files = sorted(audio_files, key=lambda x: int(os.path.splitext(x)[0]))
@@ -147,7 +261,7 @@ if __name__ == "__main__":
     list_ = []
     for f in audio_files:
         f_name = os.path.join(arg.bin_path, f.split('.')[0] + '.bin')
-        logits = np.fromfile(f_name, np.float16).reshape(1, 2, 32000)
+        logits = np.fromfile(f_name, np.float32).reshape(1, 2, 32000)
         logits = Tensor(logits)
         list_.append(logits)
     evaluate(arg, list_)

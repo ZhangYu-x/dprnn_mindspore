@@ -1,5 +1,3 @@
-#!/bin/bash
-
 if [ $# != 4 ]
 then
   echo "==========================================================================="
@@ -26,9 +24,8 @@ do
 
         rm -rf ./train_parallel$i
         mkdir ./train_parallel$i
-        mkdir ./train_parallel$i/src
         cp -r ../*.py ./train_parallel$i
-        cp -r ../src/*.py ./train_parallel$i/src
+        cp -r ../src ./train_parallel$i
         cd ./train_parallel$i || exit
         python train.py --device_num=$1 --run_distribute=$2 --device_id=$DEVICE_ID --train_dir=$4 > paralletrain.log 2>&1 &
         cd ..

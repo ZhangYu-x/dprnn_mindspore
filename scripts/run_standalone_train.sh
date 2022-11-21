@@ -1,5 +1,3 @@
-#!/bin/bash
-
 if [ $# != 2 ]
 then
   echo "==========================================================================="
@@ -20,8 +18,7 @@ export SLOG_PRINT_TO_STDOUT=0
 
 rm -rf ./train_dprnn
 mkdir ./train_dprnn
-mkdir ./train_dprnn/src
 cp -r ../*.py ./train_dprnn
-cp -r ../src/*.py ./train_dprnn/src
+cp -r ../src ./train_dprnn
 cd ./train_dprnn || exit
 python train.py --device_id=$DEVICE_ID --train_dir=$2 > train.log 2>&1 &

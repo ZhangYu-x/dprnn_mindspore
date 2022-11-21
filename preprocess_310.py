@@ -10,9 +10,9 @@ from mindspore import context
 parser = argparse.ArgumentParser(
     "Dual-path RNN"
     "with Permutation Invariant Training")
-parser.add_argument('--train_dir', type=str, default='/home/heu_MedAI/project/data_out/tt',
+parser.add_argument('--test_dir', type=str, default='/mass_data/dataset/LS-2mix/Libri2Mix/tt/',
                     help='directory including mix.json, s1.json and s2.json')
-parser.add_argument('--valid_dir', type=str, default='/mass_data/dataset/LS-2mix/Libri2Mix/cv',
+parser.add_argument('--out_dir', type=str, default='/cv',
                     help='directory including mix.json, s1.json and s2.json')
 parser.add_argument('--batch_size', default=3, type=int,   #default =3
                     help='Batch size')
@@ -45,9 +45,10 @@ def load_mixtures_and_sources(batch):
         # merge s1 and s2
         s = np.dstack((s1, s2))[0]  # T x C, C = 2
         utt_len = mix.shape[-1]
+        least_len = int(segment_len / 2)
         if segment_len >= 0:
             # segment
-            for i in range(0, utt_len - segment_len + 1, segment_len):
+            for i in range(0, utt_len - segment_len + 1, least_len):
                 mixtures.append(mix[i:i+segment_len])
                 sources.append(s[i:i+segment_len])
             if utt_len % segment_len != 0:
@@ -170,11 +171,11 @@ if __name__ == "__main__":
     context.set_context(mode=context.GRAPH_MODE, device_target="Ascend", device_id=1)
     args = parser.parse_args()
     print(args)
-    tr_dataset = DatasetGenerator(args.train_dir, args.batch_size,
+    tr_dataset = DatasetGenerator(args.test_dir, args.batch_size,
                                   sample_rate=args.sample_rate, segment=args.segment)
     dataset_ = ds.GeneratorDataset(tr_dataset, ["mixture", "lens", "sources"], shuffle=False)
     dataset = dataset_.batch(batch_size=1)
-    output_path = "testdata/"
+    output_path = args.out_dir
 
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=False)
